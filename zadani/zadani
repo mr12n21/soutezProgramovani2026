@@ -1,0 +1,2 @@
+next_move player1 failed! expected: any valid move for player1 
+actual: [41,22]
