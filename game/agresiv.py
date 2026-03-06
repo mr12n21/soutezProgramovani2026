@@ -2,7 +2,7 @@ import sys
 import json
 import time
 
-BOT_NAME = "Marek Broz"
+BOT_NAME = "Marek Broz AGGRO V2"
 BOARD_SIZE = 61
 
 COORDS = [None] * BOARD_SIZE
@@ -117,14 +117,16 @@ DEFAULT_TIME_BUDGET_SECONDS = 0.55
 ENDGAME_SOLVE_FREE_CELLS = 8
 
 # Heuristic weights inspired by strong Hexxagon engines.
-W_STONES = 1.0
-W_CONVERTIBLE = 2.0
-W_POSITION = 3.0
-W_BLOCK = 2.0
-W_CONNECTIVITY = 0.5
-W_PRESSURE = 1.2
-W_SAFETY = 1.7
-W_ATTACK_MAP = 0.55
+W_STONES = 0.7
+W_CONVERTIBLE = 3.4
+W_POSITION = 2.0
+W_BLOCK = 1.2
+W_CONNECTIVITY = 0.2
+W_PRESSURE = 2.8
+W_SAFETY = 0.6
+W_ATTACK_MAP = 1.35
+W_FRONTLINE = 1.4
+W_INVASION = 1.1
 
 
 def _positional_cell_weight(index):
@@ -286,6 +288,27 @@ def evaluate_state(state, player):
     for _, end in opp_moves_list:
         opp_attack_map += sum(1 for nb in NEIGHBORS_1[end] if state[nb] == player)
 
+    own_frontline = 0
+    opp_frontline = 0
+    own_invasion = 0
+    opp_invasion = 0
+    for idx, value in enumerate(state):
+        if value not in (player, opponent):
+            continue
+
+        enemy_adjacent = sum(
+            1 for nb in NEIGHBORS_1[idx] if state[nb] == (opponent if value == player else player)
+        )
+        if enemy_adjacent == 0:
+            continue
+
+        if value == player:
+            own_frontline += 1
+            own_invasion += enemy_adjacent
+        else:
+            opp_frontline += 1
+            opp_invasion += enemy_adjacent
+
     block_score = 0
     if opp_moves == 0:
         block_score += 1
@@ -305,7 +328,10 @@ def evaluate_state(state, player):
     value += W_PRESSURE * (own_pressure - opp_pressure)
     value += W_SAFETY * (opp_risk - own_risk)
     value += W_ATTACK_MAP * (own_attack_map - opp_attack_map)
+    value += W_FRONTLINE * (own_frontline - opp_frontline)
+    value += W_INVASION * (own_invasion - opp_invasion)
 
+    # Small mobility nudge to avoid self-traps in midgame.
     value += 0.25 * (own_moves - opp_moves)
 
     return int(value * 100)
@@ -347,6 +373,7 @@ def tactical_move_score(state, player, move):
     opponent = other_player(player)
 
     clone_bonus = 1 if DIST_MATRIX[start][end] == 1 else 0
+    jump_bonus = 2 if DIST_MATRIX[start][end] == 2 else 0
     converted = sum(1 for nb in NEIGHBORS_1[end] if state[nb] == opponent)
     positional = POSITIONAL_CELL_WEIGHT[end]
 
@@ -354,17 +381,20 @@ def tactical_move_score(state, player, move):
     end_danger = sum(1 for nb in NEIGHBORS_1[end] if state[nb] == opponent)
     start_support = sum(1 for nb in NEIGHBORS_1[start] if state[nb] == player)
 
+    frontier_bonus = end_danger * 2
+
     jump_penalty = 0
-    if DIST_MATRIX[start][end] == 2 and start_support <= 1:
-        # Avoid reckless long jumps that abandon fragile anchors.
-        jump_penalty = 3
+    if DIST_MATRIX[start][end] == 2 and start_support == 0 and converted == 0:
+        # Even this aggro profile avoids pointless long jumps with no pressure gain.
+        jump_penalty = 1
 
     return (
-        converted * 6
-        + clone_bonus * 2
-        + positional * 2
+        converted * 8
+        + clone_bonus
+        + jump_bonus
+        + positional
         + end_support
-        - end_danger * 2
+        + frontier_bonus
         - jump_penalty
     )
 
@@ -420,6 +450,7 @@ def _register_killer(killer_moves, ply, move):
 
 
 def compute_time_budget_seconds(state):
+
     return 0.86
 
 
@@ -471,7 +502,6 @@ def negamax(state, current_player, depth, alpha, beta, deadline, killer_moves, p
         child = state[:]
         apply_move(child, start, end)
 
-        # Principal Variation Search: first move full window, others scout window.
         if idx == 0:
             value = -negamax(
                 child,
@@ -599,7 +629,6 @@ def choose_next_move(state, player):
             if timed_out:
                 break
 
-            # Aspiration window failed: widen and retry this depth.
             if iteration_best_value <= alpha:
                 alpha -= aspiration_width
                 beta = (previous_score + aspiration_width) if previous_score is not None else INF

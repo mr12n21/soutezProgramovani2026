@@ -420,7 +420,8 @@ def _register_killer(killer_moves, ply, move):
 
 
 def compute_time_budget_seconds(state):
-    return 0.86
+    # Fixed tournament budget: every move gets exactly 1 second.
+    return 1.0
 
 
 def negamax(state, current_player, depth, alpha, beta, deadline, killer_moves, ply):
