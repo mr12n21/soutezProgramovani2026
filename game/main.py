@@ -1,7 +1,9 @@
 import sys
 import json
+import time
+import os
 
-BOT_NAME = "BOT_HEX_2026"
+BOT_NAME = "Marek Broz"
 BOARD_SIZE = 61
 
 COORDS = [None] * BOARD_SIZE
@@ -110,6 +112,35 @@ DIST_MATRIX = [[get_distance(i, j) for j in range(BOARD_SIZE)] for i in range(BO
 NEIGHBORS_1 = [[j for j in range(BOARD_SIZE) if j != i and DIST_MATRIX[i][j] == 1] for i in range(BOARD_SIZE)]
 NEIGHBORS_2 = [[j for j in range(BOARD_SIZE) if j != i and DIST_MATRIX[i][j] == 2] for i in range(BOARD_SIZE)]
 
+INF = 10**12
+MAX_SEARCH_DEPTH = 9
+DEFAULT_TIME_BUDGET_SECONDS = 0.55
+ENDGAME_SOLVE_FREE_CELLS = 8
+
+# Heuristic weights inspired by strong Hexxagon engines.
+W_STONES = 1.0
+W_CONVERTIBLE = 2.0
+W_POSITION = 3.0
+W_BLOCK = 2.0
+W_CONNECTIVITY = 0.5
+
+
+def _positional_cell_weight(index):
+    if index in BLOCKED:
+        return 0
+    ring = DIST_MATRIX[0][index]
+    if ring <= 1:
+        return 1
+    if ring >= 4:
+        return 1
+    return 0
+
+
+POSITIONAL_CELL_WEIGHT = [_positional_cell_weight(i) for i in range(BOARD_SIZE)]
+TRANSPOSITION_TABLE = {}
+TRANSPOSITION_MAX_SIZE = 200000
+HISTORY_TABLE = [[0] * BOARD_SIZE for _ in range(BOARD_SIZE)]
+
 
 def make_initial_state():
     state = [0] * BOARD_SIZE
@@ -201,33 +232,264 @@ def game_over_result(state):
 
 def evaluate_state(state, player):
     opponent = other_player(player)
+
     stones = state.count(player) - state.count(opponent)
-    mobility = len(generate_moves(state, player)) - len(generate_moves(state, opponent))
-    return stones * 100 + mobility * 6
+
+    # Opponent stones adjacent to our stones are tactical conversion targets.
+    own_convertible = 0
+    opp_convertible = 0
+    own_positional = 0
+    opp_positional = 0
+    for idx, value in enumerate(state):
+        if value == player:
+            own_positional += POSITIONAL_CELL_WEIGHT[idx]
+            own_convertible += sum(1 for nb in NEIGHBORS_1[idx] if state[nb] == opponent)
+        elif value == opponent:
+            opp_positional += POSITIONAL_CELL_WEIGHT[idx]
+            opp_convertible += sum(1 for nb in NEIGHBORS_1[idx] if state[nb] == player)
+
+    own_moves = len(generate_moves(state, player))
+    opp_moves = len(generate_moves(state, opponent))
+    block_score = 0
+    if opp_moves == 0:
+        block_score += 1
+    if own_moves == 0:
+        block_score -= 1
+
+    own_group = largest_group_size(state, player)
+    opp_group = largest_group_size(state, opponent)
+
+    value = 0.0
+    value += W_STONES * stones
+    value += W_CONVERTIBLE * (own_convertible - opp_convertible)
+    value += W_POSITION * (own_positional - opp_positional)
+    value += W_BLOCK * block_score
+    value += W_CONNECTIVITY * (own_group - opp_group)
+
+    # Small mobility nudge to avoid self-traps in midgame.
+    value += 0.25 * (own_moves - opp_moves)
+
+    return int(value * 100)
 
 
-def negamax(state, current_player, maximizing_player, depth, alpha, beta):
-    if depth == 0 or 0 not in state:
-        return evaluate_state(state, maximizing_player)
+def terminal_score(state, player):
+    opponent = other_player(player)
+    return (state.count(player) - state.count(opponent)) * 100000
+
+
+def largest_group_size(state, player):
+    visited = set()
+    best = 0
+
+    for idx, value in enumerate(state):
+        if value != player or idx in visited:
+            continue
+
+        stack = [idx]
+        visited.add(idx)
+        size = 0
+
+        while stack:
+            node = stack.pop()
+            size += 1
+            for nb in NEIGHBORS_1[node]:
+                if state[nb] == player and nb not in visited:
+                    visited.add(nb)
+                    stack.append(nb)
+
+        if size > best:
+            best = size
+
+    return best
+
+
+def tactical_move_score(state, player, move):
+    start, end = move
+    opponent = other_player(player)
+
+    clone_bonus = 1 if DIST_MATRIX[start][end] == 1 else 0
+    converted = sum(1 for nb in NEIGHBORS_1[end] if state[nb] == opponent)
+    positional = POSITIONAL_CELL_WEIGHT[end]
+    return converted * 4 + clone_bonus * 2 + positional
+
+
+def _history_score(move):
+    start, end = move
+    return HISTORY_TABLE[start][end]
+
+
+def _killer_bonus(move, killer_moves, ply):
+    killers = killer_moves.get(ply, ())
+    if killers and move == killers[0]:
+        return 8000
+    if len(killers) > 1 and move == killers[1]:
+        return 5000
+    return 0
+
+
+def order_moves(state, player, moves, pv_move=None, killer_moves=None, ply=0):
+    def move_order_key(move):
+        score = tactical_move_score(state, player, move) * 100
+        score += _history_score(move)
+        if killer_moves is not None:
+            score += _killer_bonus(move, killer_moves, ply)
+        return score
+
+    ordered = sorted(moves, key=move_order_key, reverse=True)
+    if pv_move is not None and pv_move in ordered:
+        ordered.remove(pv_move)
+        ordered.insert(0, pv_move)
+    return ordered
+
+
+def target_depth_for_state(state):
+    free_cells = state.count(0)
+    if free_cells <= ENDGAME_SOLVE_FREE_CELLS:
+        return 12
+    if free_cells <= 10:
+        return MAX_SEARCH_DEPTH
+    if free_cells <= 18:
+        return 8
+    if free_cells <= 30:
+        return 7
+    return 6
+
+
+def _register_killer(killer_moves, ply, move):
+    entries = list(killer_moves.get(ply, ()))
+    if move in entries:
+        entries.remove(move)
+    entries.insert(0, move)
+    killer_moves[ply] = tuple(entries[:2])
+
+
+def compute_time_budget_seconds(state):
+    env = os.getenv("HEX_TIME_BUDGET")
+    if env:
+        try:
+            parsed = float(env)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+
+    free_cells = state.count(0)
+    if free_cells <= ENDGAME_SOLVE_FREE_CELLS:
+        return 1.1
+    if free_cells <= 14:
+        return 0.9
+    if free_cells <= 26:
+        return 0.72
+    return DEFAULT_TIME_BUDGET_SECONDS
+
+
+def negamax(state, current_player, depth, alpha, beta, deadline, killer_moves, ply):
+    if time.monotonic() >= deadline:
+        raise TimeoutError()
+
+    alpha_original = alpha
+    key = (tuple(state), current_player)
+    cached = TRANSPOSITION_TABLE.get(key)
+    pv_move = None
+    if cached is not None and cached["depth"] >= depth:
+        cached_value = cached["value"]
+        cached_flag = cached["flag"]
+        pv_move = cached.get("best_move")
+        if cached_flag == "exact":
+            return cached_value
+        if cached_flag == "lower":
+            alpha = max(alpha, cached_value)
+        elif cached_flag == "upper":
+            beta = min(beta, cached_value)
+        if alpha >= beta:
+            return cached_value
+
+    if 0 not in state:
+        return terminal_score(state, current_player)
+    if depth == 0:
+        return evaluate_state(state, current_player)
 
     moves = generate_moves(state, current_player)
     if not moves:
         if not has_any_move(state, other_player(current_player)):
-            return evaluate_state(state, maximizing_player)
-        return -negamax(state, other_player(current_player), maximizing_player, depth - 1, -beta, -alpha)
+            return terminal_score(state, current_player)
+        return -negamax(state, other_player(current_player), depth - 1, -beta, -alpha, deadline, killer_moves, ply + 1)
 
-    best = -10**9
-    for start, end in moves:
+    best_value = -INF
+    best_move = None
+
+    ordered_moves = order_moves(
+        state,
+        current_player,
+        moves,
+        pv_move=pv_move,
+        killer_moves=killer_moves,
+        ply=ply,
+    )
+
+    for idx, (start, end) in enumerate(ordered_moves):
         child = state[:]
         apply_move(child, start, end)
-        score = -negamax(child, other_player(current_player), maximizing_player, depth - 1, -beta, -alpha)
-        if score > best:
-            best = score
-        if best > alpha:
-            alpha = best
+
+        # Principal Variation Search: first move full window, others scout window.
+        if idx == 0:
+            value = -negamax(
+                child,
+                other_player(current_player),
+                depth - 1,
+                -beta,
+                -alpha,
+                deadline,
+                killer_moves,
+                ply + 1,
+            )
+        else:
+            value = -negamax(
+                child,
+                other_player(current_player),
+                depth - 1,
+                -alpha - 1,
+                -alpha,
+                deadline,
+                killer_moves,
+                ply + 1,
+            )
+            if alpha < value < beta:
+                value = -negamax(
+                    child,
+                    other_player(current_player),
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    deadline,
+                    killer_moves,
+                    ply + 1,
+                )
+
+        if value > best_value:
+            best_value = value
+            best_move = (start, end)
+
+        alpha = max(alpha, best_value)
         if alpha >= beta:
+            _register_killer(killer_moves, ply, (start, end))
+            HISTORY_TABLE[start][end] += depth * depth
             break
-    return best
+
+    flag = "exact"
+    if best_value <= alpha_original:
+        flag = "upper"
+    elif best_value >= beta:
+        flag = "lower"
+
+    TRANSPOSITION_TABLE[key] = {
+        "depth": depth,
+        "value": best_value,
+        "flag": flag,
+        "best_move": best_move,
+    }
+
+    return best_value
 
 
 def choose_next_move(state, player):
@@ -235,39 +497,103 @@ def choose_next_move(state, player):
     if not moves:
         return []
 
-    # Move ordering by immediate tactical gain.
+    if len(TRANSPOSITION_TABLE) > TRANSPOSITION_MAX_SIZE:
+        TRANSPOSITION_TABLE.clear()
+
     opponent = other_player(player)
-    scored = []
-    for start, end in moves:
-        gain = 1 if DIST_MATRIX[start][end] == 1 else 0
-        converted = 0
-        for nb in NEIGHBORS_1[end]:
-            if state[nb] == opponent:
-                converted += 1
-        scored.append((gain + converted, (start, end)))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    ordered = [m for _, m in scored]
-
+    killer_moves = {}
+    ordered = order_moves(state, player, moves)
     best_move = ordered[0]
-    best_value = -10**9
+    completed_best = best_move
 
-    for start, end in ordered:
-        child = state[:]
-        apply_move(child, start, end)
-        value = -negamax(child, opponent, player, 1, -10**9, 10**9)
-        if value > best_value:
-            best_value = value
-            best_move = (start, end)
+    depth_limit = target_depth_for_state(state)
+    deadline = time.monotonic() + compute_time_budget_seconds(state)
 
-    for start, end in ordered[:8]:
-        child = state[:]
-        apply_move(child, start, end)
-        value = -negamax(child, opponent, player, 2, -10**9, 10**9)
-        if value > best_value:
-            best_value = value
-            best_move = (start, end)
+    aspiration_width = 600
+    previous_score = None
 
-    return [best_move[0], best_move[1]]
+    for depth in range(1, depth_limit + 1):
+        if time.monotonic() >= deadline:
+            break
+
+        iteration_best_value = -INF
+        iteration_best_move = completed_best
+        if previous_score is None:
+            alpha = -INF
+            beta = INF
+        else:
+            alpha = previous_score - aspiration_width
+            beta = previous_score + aspiration_width
+        timed_out = False
+
+        while True:
+            current_alpha = alpha
+            failed = False
+
+            for start, end in ordered:
+                child = state[:]
+                apply_move(child, start, end)
+
+                try:
+                    value = -negamax(
+                        child,
+                        opponent,
+                        depth - 1,
+                        -beta,
+                        -current_alpha,
+                        deadline,
+                        killer_moves,
+                        1,
+                    )
+                except TimeoutError:
+                    timed_out = True
+                    failed = True
+                    break
+
+                if value > iteration_best_value:
+                    iteration_best_value = value
+                    iteration_best_move = (start, end)
+
+                current_alpha = max(current_alpha, iteration_best_value)
+
+            if timed_out:
+                break
+
+            # Aspiration window failed: widen and retry this depth.
+            if iteration_best_value <= alpha:
+                alpha -= aspiration_width
+                beta = (previous_score + aspiration_width) if previous_score is not None else INF
+                aspiration_width *= 2
+                iteration_best_value = -INF
+                iteration_best_move = completed_best
+                failed = True
+            elif iteration_best_value >= beta:
+                alpha = (previous_score - aspiration_width) if previous_score is not None else -INF
+                beta += aspiration_width
+                aspiration_width *= 2
+                iteration_best_value = -INF
+                iteration_best_move = completed_best
+                failed = True
+
+            if not failed:
+                break
+
+        if timed_out:
+            break
+
+        completed_best = iteration_best_move
+        previous_score = iteration_best_value
+        aspiration_width = max(300, aspiration_width // 2)
+        ordered = order_moves(
+            state,
+            player,
+            ordered,
+            pv_move=completed_best,
+            killer_moves=killer_moves,
+            ply=0,
+        )
+
+    return [completed_best[0], completed_best[1]]
 
 
 def choose_and_apply_next_move(state, player):
