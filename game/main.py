@@ -1,7 +1,6 @@
 import sys
 import json
 import time
-import os
 
 BOT_NAME = "Marek Broz"
 BOARD_SIZE = 61
@@ -364,23 +363,8 @@ def _register_killer(killer_moves, ply, move):
 
 
 def compute_time_budget_seconds(state):
-    env = os.getenv("HEX_TIME_BUDGET")
-    if env:
-        try:
-            parsed = float(env)
-            if parsed > 0:
-                return parsed
-        except ValueError:
-            pass
-
-    free_cells = state.count(0)
-    if free_cells <= ENDGAME_SOLVE_FREE_CELLS:
-        return 1.1
-    if free_cells <= 14:
-        return 0.9
-    if free_cells <= 26:
-        return 0.72
-    return DEFAULT_TIME_BUDGET_SECONDS
+    # Fixed tournament budget: every move gets exactly 1 second.
+    return 1.0
 
 
 def negamax(state, current_player, depth, alpha, beta, deadline, killer_moves, ply):
