@@ -112,9 +112,10 @@ NEIGHBORS_1 = [[j for j in range(BOARD_SIZE) if j != i and DIST_MATRIX[i][j] == 
 NEIGHBORS_2 = [[j for j in range(BOARD_SIZE) if j != i and DIST_MATRIX[i][j] == 2] for i in range(BOARD_SIZE)]
 
 INF = 10**12
-MAX_SEARCH_DEPTH = 9
+MAX_SEARCH_DEPTH = 14
 DEFAULT_TIME_BUDGET_SECONDS = 0.55
 ENDGAME_SOLVE_FREE_CELLS = 8
+QUIESCENCE_DEPTH = 4
 
 # Heuristic weights inspired by strong Hexxagon engines.
 W_STONES = 1.0
@@ -392,23 +393,29 @@ def order_moves(state, player, moves, pv_move=None, killer_moves=None, ply=0):
         return score
 
     ordered = sorted(moves, key=move_order_key, reverse=True)
+    
+    # Prioritize PV move at position 0 (most researched from prior iterations).
     if pv_move is not None and pv_move in ordered:
         ordered.remove(pv_move)
         ordered.insert(0, pv_move)
+    
     return ordered
 
 
 def target_depth_for_state(state):
     free_cells = state.count(0)
+    # More aggressive deepening in endgame and midgame.
     if free_cells <= ENDGAME_SOLVE_FREE_CELLS:
-        return 12
+        return 14
     if free_cells <= 10:
-        return MAX_SEARCH_DEPTH
+        return 12
     if free_cells <= 18:
+        return 11
+    if free_cells <= 26:
+        return 10
+    if free_cells <= 35:
         return 8
-    if free_cells <= 30:
-        return 7
-    return 6
+    return 7
 
 
 def _register_killer(killer_moves, ply, move):
@@ -420,7 +427,60 @@ def _register_killer(killer_moves, ply, move):
 
 
 def compute_time_budget_seconds(state):
-    return 0.86
+    """Adaptive time allocation based on game phase."""
+    free_cells = state.count(0)
+    
+    # Endgame: maximum time for precision.
+    if free_cells <= 8:
+        return 1.2
+    
+    # Critical midgame (20-30 free cells).
+    if free_cells <= 30:
+        return 0.95
+    
+    # Opening: less critical, use standard budget.
+    return 0.75
+
+
+def quiescence(state, current_player, alpha, beta, deadline, ply):
+    """Search only tactic-heavy moves (conversions) when depth=0 for clarity."""
+    if time.monotonic() >= deadline:
+        raise TimeoutError()
+    
+    # Limit quiescence depth to prevent infinite recursion.
+    if ply > QUIESCENCE_DEPTH:
+        return evaluate_state(state, current_player)
+    
+    stand_pat = evaluate_state(state, current_player)
+    if stand_pat >= beta:
+        return beta
+    if stand_pat > alpha:
+        alpha = stand_pat
+    
+    opponent = other_player(current_player)
+    all_moves = generate_moves(state, current_player)
+    
+    # Only examine conversion moves (those that capture opponent stones).
+    conversion_moves = []
+    for start, end in all_moves:
+        converted = sum(1 for nb in NEIGHBORS_1[end] if state[nb] == opponent)
+        if converted > 0:
+            conversion_moves.append((start, end, converted))
+    
+    # Sort by number of conversions (descending).
+    conversion_moves.sort(key=lambda x: -x[2])
+    
+    for start, end, _ in conversion_moves[:8]:  # Limit width to avoid explosion.
+        child = state[:]
+        apply_move(child, start, end)
+        
+        value = -quiescence(child, opponent, -beta, -alpha, deadline, ply + 1)
+        if value >= beta:
+            return beta
+        if value > alpha:
+            alpha = value
+    
+    return alpha
 
 
 def negamax(state, current_player, depth, alpha, beta, deadline, killer_moves, ply):
@@ -447,7 +507,11 @@ def negamax(state, current_player, depth, alpha, beta, deadline, killer_moves, p
     if 0 not in state:
         return terminal_score(state, current_player)
     if depth == 0:
-        return evaluate_state(state, current_player)
+        # At depth 0, run quiescence search for tactic clarity.
+        try:
+            return quiescence(state, current_player, alpha, beta, deadline, ply)
+        except TimeoutError:
+            return evaluate_state(state, current_player)
 
     moves = generate_moves(state, current_player)
     if not moves:
