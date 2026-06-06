@@ -1,0 +1,185 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>Soutez 2026 PRG</title>
+    </head>
+    <body>
+        <h1>Soutez 2026 PRG</h1>
+
+        <p>Stav: <span id="status">Připraven</span></p>
+        <p>Krok: <span id="step">-</span></p>
+        <p>Vozidel: <span id="vehicle-count">-</span></p>
+
+        <button onclick="initSim()">1. Inicializace</button>
+        <button id="btn-load-map" onclick="loadMap()" disabled>
+            2. Načíst mapu
+        </button>
+        <button id="btn-load-requests" onclick="loadRequests()" disabled>
+            3. Načíst vozidla
+        </button>
+        <button id="btn-plan" onclick="planRoutes()" disabled>
+            4. Naplánovat trasy
+        </button>
+        <button id="btn-run-sim" onclick="runSimulation()" disabled>
+            5. Spustit simulaci
+        </button>
+        <button id="btn-send-protocol" onclick="sendProtocol()" disabled>
+            6. Odeslat protokol
+        </button>
+
+        <p id="error-msg"></p>
+
+        <h2>Mapa</h2>
+        <canvas id="map-canvas"></canvas>
+
+        <h2>Vozidla</h2>
+        <ul id="vehicle-list"></ul>
+
+        <h2>Protokol</h2>
+        <pre id="log"></pre>
+
+        <script>
+            let st = { veh: null, hist: null, step: 0 };
+
+            function log(m) {
+                let l = document.getElementById("log");
+                l.textContent += m + "\n";
+                l.scrollTop = l.scrollHeight;
+            }
+            function stat(m) {
+                document.getElementById("status").textContent = m;
+            }
+            function err(m) {
+                document.getElementById("error-msg").textContent = m;
+            }
+            function on(id) {
+                document.getElementById(id).disabled = false;
+            }
+
+            async function post(url) {
+                let r = await fetch(url, { method: "POST" });
+                let d = await r.json();
+                if (!r.ok) throw new Error(d.error || "chyba");
+                return d;
+            }
+
+            async function initSim() {
+                stat("Inicializuji...");
+                err("");
+                try {
+                    let d = await post("/api/init");
+                    st.veh = d.vehicles;
+                    document.getElementById("vehicle-count").textContent =
+                        d.vehicles.length;
+                    on("btn-load-map");
+                    vehList();
+                    stat("Inicializováno");
+                    log("Initialized, session " + d.session_id);
+                } catch (e) {
+                    stat("Chyba");
+                    err(e.message);
+                    log("ERROR: " + e.message);
+                }
+            }
+
+            async function loadMap() {
+                try {
+                    let d = await post("/api/load-map");
+                    drawMap(d);
+                    on("btn-load-requests");
+                    stat("Mapa načtena");
+                    log("Map loaded");
+                } catch (e) {
+                    log("ERROR: " + e.message);
+                }
+            }
+
+            async function loadRequests() {
+                try {
+                    let d = await post("/api/load-requests");
+                    on("btn-plan");
+                    log("Requests: " + d.requests.length);
+                } catch (e) {
+                    log("ERROR: " + e.message);
+                }
+            }
+
+            async function planRoutes() {
+                try {
+                    let d = await post("/api/plan-routes");
+                    on("btn-run-sim");
+                    log("Planned: " + d.planned + "/" + d.total);
+                } catch (e) {
+                    log("ERROR: " + e.message);
+                }
+            }
+
+            async function runSimulation() {
+                stat("Simuluji...");
+                err("");
+                try {
+                    let d = await post("/api/run-sim");
+                    st.hist = d.history;
+                    st.step = 0;
+                    on("btn-send-protocol");
+                    anim();
+                    stat("Simulace dokončena");
+                    log("Simulation done: " + d.steps + " steps");
+                } catch (e) {
+                    stat("Chyba");
+                    err(e.message);
+                    log("ERROR: " + e.message);
+                }
+            }
+
+            async function sendProtocol() {
+                stat("Odesílám protokol...");
+                err("");
+                try {
+                    let d = await post("/api/send-protocol");
+                    stat("Protokol odeslán");
+                    log("Protocol status: " + d.status);
+                } catch (e) {
+                    stat("Chyba");
+                    err(e.message);
+                    log("ERROR: " + e.message);
+                }
+            }
+
+            function drawMap(m) {
+                let c = document.getElementById("map-canvas"),
+                    ctx = c.getContext("2d");
+                let img = new Image();
+                img.onload = function () {
+                    c.width = img.width;
+                    c.height = img.height;
+                    ctx.drawImage(img, 0, 0);
+                };
+                img.src = "data:image/png;base64," + m.image;
+            }
+
+            function vehList() {
+                let ul = document.getElementById("vehicle-list");
+                ul.innerHTML = "";
+                if (!st.veh) return;
+                st.veh.forEach((v) => {
+                    let li = document.createElement("li");
+                    li.textContent =
+                        v.type + " id=" + v.id + " prio=" + v.priority;
+                    ul.appendChild(li);
+                });
+            }
+
+            function anim() {
+                document.getElementById("step").textContent = st.step;
+                if (!st.hist || st.step >= st.hist.length) return;
+                st.step++;
+                setTimeout(anim, 100);
+            }
+
+            vehList();
+            log("Page ready");
+        </script>
+    </body>
+</html>

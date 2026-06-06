@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - API_KEY=Y6QM2VVTAY
+      - SERVER_URL=https://signals.programuj.si
+    volumes:
+      - ./app:/app/app
+
+    stdin_open: true
+    tty: true
