@@ -2,9 +2,13 @@
 Ridi simulaci: vozidla, semafory, cas
 """
 
+import logging
+
 from app.config import MX_ST, err
 from app.pathfinding import PF
 from app.traffic import TM, VS
+
+log = logging.getLogger(__name__)
 
 PathFinder = PF
 TrafficManager = TM

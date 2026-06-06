@@ -1,8 +1,11 @@
 import json
+import logging
 from io import BytesIO
 
 import requests
 from PIL import Image
+
+log = logging.getLogger(__name__)
 
 
 class APIClient:

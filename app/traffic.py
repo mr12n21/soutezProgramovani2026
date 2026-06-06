@@ -35,7 +35,20 @@ class TM:
                 st["cg"] = st["r"][(idx + 1) % len(st["r"])]
 
             st["st"] = sn
+    def step(s, sn):
+        """Compatibility wrapper called by Simulator: advance signals for step `sn`."""
+        s.st(sn)
 
+    @property
+    def intersections_state(s):
+        """Return a mapping of intersection id -> current state expected by Simulator.
+
+        Each value contains keys `cgreen` (current green direction) and `pos` (position tuple).
+        """
+        state = {}
+        for iid, info in s.ist.items():
+            state[iid] = {"cgreen": info.get("cg"), "pos": info.get("p")}
+        return state
     def cp(s, x, y, pr):
         """prujezd krizovatkou"""
         iid = s.mp.get_intersection_id(x, y)
@@ -79,106 +92,63 @@ class VS:
     def __init__(s, mp, tm, vd):
         s.mp = mp
         s.tm = tm
-        s.v = []
+        s.vehicles = []
 
-        for v in vd:
-            s.v.append(
+        for vehicle in vd:
+            s.vehicles.append(
                 {
-                    "id": v["carId"],
-                    "t": v["type"],
-                    "f": tuple(v["from"]),
-                    "t_o": tuple(v["to"]),
-                    "pr": v["priority"],
-                    "st": v["startTime"],
-                    "p": None,
-                    "cp": None,
-                    "st_v": "waiting",
-                    "wa": None,
+                    "id": vehicle["carId"],
+                    "type": vehicle.get("type"),
+                    "from": tuple(vehicle["from"]),
+                    "to": tuple(vehicle["to"]),
+                    "priority": vehicle.get("priority", 0),
+                    "start_time": vehicle.get("startTime", 0),
+                    "path": None,
+                    "current_pos": None,
+                    "status": "waiting",
+                    "waiting_at": None,
                 }
             )
 
-        s.v.sort(key=lambda v: v["pr"])
+        s.vehicles.sort(key=lambda v: v["priority"])
 
-    def sv(s, v, pf):
-        p = pf.fp(v["f"], v["t_o"])
-        if not p:
-            return err(f"Auto: {v['id']}")
-        v["p"] = p
-        return True
-
-    def uv(s, v, st, tm):
-        """moznost pohybu"""
-        if st < v["st"]:
-            return None
-        if st == v["st"]:
-            v["st_v"], v["cp"] = "driving", v["f"]
-            return v["f"]
-        if not v["p"]:
-            return None
-
-        idx = min(st - v["st"], len(v["p"]) - 1)
-        if idx >= len(v["p"]) - 1:
-            v["st_v"] = "arrived"
-            return v["p"][-1]
-
-        nx = v["p"][idx]
-
-        if not tm.mp.is_passable(*nx):
-            v["st_v"], v["wa"] = "blocked", nx
-        elif not tm.cp(nx[0], nx[1], v["pr"]):
-            v["st_v"], v["wa"] = "waiting", nx
-        else:
-            v["st_v"], v["wa"], v["cp"] = "driving", None, nx
-
-        return v["cp"]
-
+    def schedule_vehicle(s, vehicle, pf):
+        path = pf.find_path(vehicle["from"], vehicle["to"])
+        if not path:
+            return False
         vehicle["path"] = path
         return True
 
-    def update_vehicle(self, vehicle, current_step, traffic_mgr):
-        """
-        stav vozidla
-        vrazeni pozice nebo jede dal none
-        """
+    def update_vehicle(s, vehicle, current_step, traffic_mgr):
+        """stav vozidla, vraci pozici nebo None"""
 
-        # je na pame
         if current_step < vehicle["start_time"]:
             return None
 
-        # objeveni na mape
         if current_step == vehicle["start_time"]:
             vehicle["status"] = "driving"
             vehicle["current_pos"] = vehicle["from"]
             return vehicle["from"]
 
-        # mapa uz je
-        if not vehicle["path"] or len(vehicle["path"]) == 0:
+        if not vehicle["path"]:
             return None
 
-        # vzdalenost cesty
         steps_traveled = current_step - vehicle["start_time"]
         path_idx = min(steps_traveled, len(vehicle["path"]) - 1)
 
-        # cil detecke
         if path_idx >= len(vehicle["path"]) - 1:
             vehicle["status"] = "arrived"
+            vehicle["current_pos"] = vehicle["path"][-1]
             return vehicle["path"][-1]
 
         next_pos = vehicle["path"][path_idx]
 
-        # overeni priority a pravidel
-        if not traffic_mgr.map.is_passable(next_pos[0], next_pos[1]):
+        if not traffic_mgr.mp.is_passable(*next_pos):
             vehicle["status"] = "blocked"
             vehicle["waiting_at"] = next_pos
             return vehicle["current_pos"]
 
-        # moznost jet
-        can_go = traffic_mgr.can_pass_intersection(
-            next_pos[0], next_pos[1], vehicle["priority"]
-        )
-
-        if not can_go:
-            # ceka
+        if not traffic_mgr.cp(next_pos[0], next_pos[1], vehicle["priority"]):
             vehicle["status"] = "waiting"
             vehicle["waiting_at"] = next_pos
             return vehicle["current_pos"]

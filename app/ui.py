@@ -11,9 +11,9 @@ from flask import Flask, jsonify, render_template, request
 from PIL import Image
 
 from app.api import APIClient
-from app.config import K, U
-from app.map_parser import MP
-from app.simulator import SIM
+from app.config import K as API_KEY, U as SERVER_URL
+from app.map_parser import MP as MapParser
+from app.simulator import Simulator
 
 log = logging.getLogger(__name__)
 
@@ -159,7 +159,7 @@ def api_send_protocol():
 
 @app.route("/api/status")
 def api_status():
-    """status"""
+    """Informace o aktuálním stavu"""
     return jsonify(
         {
             "initialized": state["api"] is not None,
